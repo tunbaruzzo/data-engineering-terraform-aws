@@ -47,6 +47,13 @@ module "network" {
 
   # Región AWS utilizada por el módulo.
   aws_region = var.aws_region
+
+  # CIDR principal de la VPC.
+  #
+  # El valor se define en environments/dev/variables.tf
+  # y se envía al módulo network para evitar dejarlo
+  # hardcodeado dentro del módulo reutilizable.
+  vpc_cidr = var.vpc_cidr
 }
 
 
@@ -84,21 +91,31 @@ module "storage" {
 # MÓDULO DE IDENTIDAD
 # ============================================================
 
-# Invoca el módulo de identidad.
+# Invoca el módulo ubicado en modules/identity.
 #
-# Recibe información del módulo storage para poder generar
-# políticas IAM específicas sobre el bucket y prefijo
-# realmente creados.
+# Este módulo crea:
+# - rol de ejecución para servicios de procesamiento
+# - rol de auditoría
+#
+# Además, recibe información del módulo storage para
+# aplicar permisos S3 de mínimo privilegio.
 module "identity" {
 
+  # Ruta hacia el módulo de identidad.
   source = "../../modules/identity"
 
-  # Nombre del entorno.
+  # Nombre del entorno actual.
   environment = var.environment
 
-  # ARN del bucket generado por el módulo storage.
+  # ARN del bucket S3 creado por el módulo storage.
+  #
+  # Se utiliza para construir la política IAM del rol
+  # de procesamiento sin hardcodear el bucket.
   data_bucket_arn = module.storage.data_bucket_arn
 
   # Prefijo autorizado dentro del bucket.
+  #
+  # Debe coincidir con el prefijo definido en el módulo
+  # storage para limitar el acceso solamente a esa zona.
   data_prefix = module.storage.data_prefix
 }

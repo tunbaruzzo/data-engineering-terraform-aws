@@ -22,7 +22,7 @@ resource "aws_vpc" "main" {
   # Rango de direcciones IP privadas disponible dentro de la VPC.
   # 10.0.0.0/16 permite disponer de una gran cantidad
   # de direcciones privadas para futuras subredes.
-  cidr_block = "10.0.0.0/16"
+  cidr_block = var.vpc_cidr
 
   # Permite utilizar nombres DNS dentro de la VPC.
   enable_dns_support = true
