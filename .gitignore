@@ -1,0 +1,45 @@
+# ============================================================
+# TERRAFORM
+# ============================================================
+
+# Directorio local generado por "terraform init".
+# Contiene providers y archivos internos descargados.
+# Se puede reconstruir ejecutando nuevamente terraform init.
+**/.terraform/*
+
+# Archivos de estado de Terraform.
+# Pueden contener información sensible y NO deben subirse a Git.
+*.tfstate
+*.tfstate.*
+
+# Archivos generados por crash de Terraform.
+crash.log
+crash.*.log
+
+# Archivos de variables que podrían contener secretos.
+*.tfvars
+*.tfvars.json
+
+# Archivos de plan generados con terraform plan -out
+*.tfplan
+
+# Archivos temporales de override.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ============================================================
+# SISTEMA / EDITOR
+# ============================================================
+
+# Archivos propios de Windows.
+Thumbs.db
+Desktop.ini
+
+# Configuración local de VS Code.
+.vscode/
+
+# Planes binarios de Terraform generados con terraform plan -out
+tfplan
+**/tfplan
