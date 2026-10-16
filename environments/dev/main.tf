@@ -119,3 +119,26 @@ module "identity" {
   # storage para limitar el acceso solamente a esa zona.
   data_prefix = module.storage.data_prefix
 }
+
+
+
+# ============================================================
+# MODULO DE INGESTA - KINESIS
+# ============================================================
+
+# Integra el servicio de streaming al entorno DEV.
+# Reutiliza el bucket S3 creado por el modulo storage.
+
+module "kinesis" {
+  source = "../../modules/kinesis"
+
+  # Entorno actual.
+  environment = var.environment
+
+  # Capacidad inicial: 2 shards.
+  shard_count = 2
+
+  # Informacion del Data Lake existente.
+  data_bucket_arn = module.storage.data_bucket_arn
+  data_prefix     = module.storage.data_prefix
+}

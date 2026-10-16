@@ -43,3 +43,20 @@ Desktop.ini
 # Planes binarios de Terraform generados con terraform plan -out
 tfplan
 **/tfplan
+
+
+# ============================================================
+# PYTHON - ENTORNOS VIRTUALES Y ARCHIVOS TEMPORALES
+# ============================================================
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ============================================================
+# EVIDENCIAS - ARCHIVOS DE DATOS DESCARGADOS DE S3
+# ============================================================
+
+evidencias/bronze/
