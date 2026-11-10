@@ -1,0 +1,66 @@
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topic-init
+  namespace: urban-streaming
+  labels:
+    app: kafka-topic-init
+    app.kubernetes.io/part-of: urban-data-platform
+
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 180
+
+  template:
+    metadata:
+      labels:
+        app: kafka-topic-init
+
+    spec:
+      restartPolicy: OnFailure
+
+      containers:
+        - name: topic-init
+          image: apache/kafka:3.9.1
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - /bin/bash
+            - -c
+
+          args:
+            - |
+              set -e
+
+              echo "Esperando a Kafka..."
+
+              until /opt/kafka/bin/kafka-broker-api-versions.sh \
+                --bootstrap-server kafka:9092 > /dev/null 2>&1; do
+                sleep 5
+              done
+
+              echo "Kafka disponible. Verificando topico..."
+
+              /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server kafka:9092 \
+                --create \
+                --if-not-exists \
+                --topic urban_sensors \
+                --partitions 3 \
+                --replication-factor 1
+
+              echo "Verificando particiones..."
+
+              /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server kafka:9092 \
+                --describe \
+                --topic urban_sensors
+
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
