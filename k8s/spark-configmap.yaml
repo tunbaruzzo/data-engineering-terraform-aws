@@ -1,0 +1,21 @@
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-config
+  namespace: urban-streaming
+  labels:
+    app.kubernetes.io/part-of: urban-data-platform
+    app.kubernetes.io/component: spark
+
+data:
+  # Conexion con nuestro broker Kafka
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  KAFKA_TOPIC: "urban_sensors"
+
+  # Checkpoint del procesamiento
+  SPARK_CHECKPOINT_PATH: "/tmp/spark-checkpoints/urban-sensors"
+
+  # Configuracion general de Spark
+  SPARK_LOCAL_IP: "127.0.0.1"
+  PYSPARK_PYTHON: "python3"

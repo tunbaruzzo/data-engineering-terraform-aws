@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: urban-streaming
+  labels:
+    app.kubernetes.io/part-of: urban-data-platform
+    environment: dev

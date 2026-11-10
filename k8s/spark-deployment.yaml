@@ -1,0 +1,67 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: urban-sensors-spark
+  namespace: urban-streaming
+  labels:
+    app: urban-sensors-spark
+    app.kubernetes.io/part-of: urban-data-platform
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: urban-sensors-spark
+  template:
+    metadata:
+      labels:
+        app: urban-sensors-spark
+    spec:
+      containers:
+        - name: spark
+          image: urban-sensors-spark:1.0
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - /opt/spark/bin/spark-submit
+          args:
+            - --master
+            - "local[2]"
+            - --driver-memory
+            - "1g"
+            - --conf
+            - spark.jars.ivy=/tmp/.ivy2
+            - --packages
+            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7
+            - /opt/spark/work-dir/streaming_job.py
+
+          envFrom:
+            - configMapRef:
+                name: spark-config
+
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "3Gi"
+              cpu: "2000m"
+
+          volumeMounts:
+            - name: spark-temp
+              mountPath: /tmp
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 185
+            runAsGroup: 185
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+      volumes:
+        - name: spark-temp
+          emptyDir: {}
