@@ -22,6 +22,8 @@ crash.*.log
 
 # Archivos de plan generados con terraform plan -out
 *.tfplan
+tfplan-*
+**/tfplan-*
 
 # Archivos temporales de override.
 override.tf
@@ -51,6 +53,7 @@ tfplan
 
 .venv/
 venv/
+.venv-flink/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -60,3 +63,14 @@ __pycache__/
 # ============================================================
 
 evidencias/bronze/
+
+# ============================================================
+# APACHE FLINK - ARCHIVOS GENERADOS POR MAVEN
+# ============================================================
+
+# Artefactos de compilacion reconstruibles.
+flink/target/
+
+# Artefactos de empaquetado de Apache Flink.
+flink/package/
+flink/application.zip
