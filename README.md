@@ -935,42 +935,45 @@ python -m unittest discover -s .\tests -p "test_*.py" -v
 
 El archivo `flink/application-pre05.zip` se genera localmente y está excluido de Git. **Debe reconstruirse antes de un `terraform plan` que lea su hash**. Los archivos experimentales y copias de seguridad no forman parte de la entrega final.
 
-### Prueba de reproducibilidad desde un clon limpio
+### Prueba de reproducibilidad desde un clon limpio (22/11/2026)
 
-**Propósito:** demostrar que un tercero puede obtener un repositorio limpio y reconstruir `flink/application-pre05.zip` sin copiar el JAR ni el ZIP de la máquina de desarrollo. Este control responde a la observación recibida en la Pre-entrega 04 sobre la reconstrucción del artefacto a partir del repositorio.
+**Objetivo y resultado: APROBADA.** Se reconstruyeron el JAR y `flink/application-pre05.zip` desde un clon independiente de la rama `feature/lakehouse`, sin copiar artefactos del directorio de desarrollo. Esta prueba responde a la observación de la Pre-entrega 04 sobre la posibilidad de reconstruir el paquete usando los archivos versionados.
 
-**Requisitos locales:** Git, Maven, JDK 11 compatible, Python 3.11 y conexión a Internet para resolver las dependencias Maven/Python. Esta validación **no requiere acceso a AWS, Terraform apply ni iniciar servicios facturables**.
+**Commit de origen validado:** `1c36634` (`feat: implementar lakehouse Iceberg con Flink y Glue`). Se hizo un commit local antes del experimento para que el clon incluyera los archivos nuevos, como `flink/build_package.py`, `flink/pom.xml` y la clase Java de compatibilidad.
 
-Ejecutar **después de realizar el commit de la rama `feature/lakehouse`**, desde la raíz del repositorio original. La ruta `..\pre05-clon-limpio` debe estar libre antes de ejecutar el comando:
+**Requisitos:** Git, Maven, Java 11 y Python compatible con el script de empaquetado, con dependencias Maven disponibles. No se requiere Terraform, AWS ni encender Kinesis o Flink. Los comandos siguientes son para **Windows PowerShell** desde la raíz del proyecto original:
 
 ```powershell
-# Clonar solamente archivos versionados de la rama de entrega.
-git clone --no-hardlinks --branch feature/lakehouse . ..\pre05-clon-limpio
-Set-Location ..\pre05-clon-limpio
+# Crear un clon independiente desde la rama versionada.
+git clone --branch feature/lakehouse --single-branch . "..\pre05-clon-limpio"
 
-# Confirmar que el artefacto y el JAR no vienen incluidos en Git.
-if (Test-Path .\flink\application-pre05.zip) { throw "El ZIP ya estaba en el clon" }
-if (Test-Path .\flink\target\pyflink-dependencies.jar) { throw "El JAR ya estaba en el clon" }
+# Confirmar el commit y la ausencia de compilados en el nuevo clon.
+git -C "..\pre05-clon-limpio" log -1 --oneline
+Test-Path "..\pre05-clon-limpio\flink\target\pyflink-dependencies.jar"
+Test-Path "..\pre05-clon-limpio\flink\application-pre05.zip"
 
-# Generar artefactos exclusivamente a partir del código del clon.
-mvn -f .\flink\pom.xml -DskipTests package
-if ($LASTEXITCODE -ne 0) { throw "Falló la compilación Maven" }
+# Compilar desde el clon, sin usar el JAR del repositorio original.
+mvn -f "..\pre05-clon-limpio\flink\pom.xml" -DskipTests package
 
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+# Construir y validar el ZIP usando el script del propio clon.
+Push-Location "..\pre05-clon-limpio"
 python .\flink\build_package.py
-if ($LASTEXITCODE -ne 0) { throw "Falló la construcción del ZIP" }
-
-# Verificar la existencia e integridad del ZIP, así como sus dos entradas.
-python -c "import zipfile; p='flink/application-pre05.zip'; z=zipfile.ZipFile(p); assert z.testzip() is None; assert {'main.py','lib/pyflink-dependencies.jar'}.issubset(z.namelist()); print('ZIP RECONSTRUIDO Y VALIDADO DESDE CLON LIMPIO')"
-if ($LASTEXITCODE -ne 0) { throw "Falló la comprobación del ZIP" }
-
-git status --short
+Pop-Location
 ```
 
-**Criterios de aceptación:** (1) el clon inicialmente no contiene JAR ni ZIP generados; (2) Maven devuelve `BUILD SUCCESS`; (3) `build_package.py` genera el ZIP; (4) la comprobación de integridad confirma `main.py` y `lib/pyflink-dependencies.jar`; (5) `git status --short` no muestra artefactos generados sin seguimiento. La caché de dependencias de Maven puede seguir siendo compartida con el equipo local: se comprueba la independencia de **archivos del repositorio**, no de la red ni del caché de Maven.
+**Evidencia real observada:** `git log` devolvió el commit `1c36634`; ambos `Test-Path` devolvieron **`False`** antes de la compilación; Maven terminó con **`BUILD SUCCESS`**; `build_package.py` informó:
 
-**Estado de esta prueba:** pendiente de ejecutar sobre el commit definitivo de `feature/lakehouse`. No se declara superada hasta observar los resultados. Una vez validada, guardar la captura como `evidencias/preentrega-05/10_reproducibilidad_clon_limpio.png` y actualizar este párrafo con el resultado real antes de publicar el Pull Request.
+```text
+ZIP GENERADO CORRECTAMENTE
+ESTRUCTURA OK
+INTEGRIDAD OK
+HASHES OK
+TAMANO: 185.67 MiB
+```
+
+El paquete contiene `main.py` y `lib/pyflink-dependencies.jar` y se validó su integridad mediante el script versionado. **Alcance:** se demuestra la reproducibilidad de construcción **a partir de los archivos controlados por Git**, no un build hermético sin red ni sin caché Maven. Tampoco se afirma haber vuelto a ejecutar el paquete reconstruido en AWS; esa diferencia se documenta en las limitaciones.
+
+La captura del resultado se conserva como `evidencias/preentrega-05/10_reproducibilidad_clon_limpio.png`. También se verificó previamente en consola la ausencia del JAR y ZIP en el clon antes de la reconstrucción.
 
 ### Prueba real de extremo a extremo en AWS (19/11/2026)
 
@@ -1070,7 +1073,9 @@ El editor de Athena utilizó `s3://data-engineering-dev-047719648001/athena-resu
 
 #### 10. Reconstrucción del ZIP desde un clon limpio
 
-La evidencia `10_reproducibilidad_clon_limpio.png` se agregará únicamente después de ejecutar y aprobar el procedimiento de reproducibilidad descrito anteriormente. **Pendiente de verificación; no se presenta como resultado ya obtenido.**
+![Reconstrucción del ZIP desde clon limpio con estructura, integridad y hashes correctos](evidencias/preentrega-05/10_reproducibilidad_clon_limpio.png)
+
+**Validación aprobada el 22/11/2026:** clon de `feature/lakehouse` en carpeta independiente, commit `1c36634`, JAR y ZIP iniciales ausentes, compilación Maven exitosa y reconstrucción del ZIP de **185,67 MiB** con estructura, integridad y hashes verificados. La receta y su alcance se documentan en «Prueba de reproducibilidad desde un clon limpio».
 
 No se conserva una captura independiente del estado `RUNNING` de esta ejecución: se observó el estado por AWS CLI durante la prueba, pero no se documenta aquí como evidencia gráfica adicional.
 
@@ -1125,10 +1130,10 @@ En la ejecución documentada, antes de incorporar el interruptor, se revisó y a
 - **Lectura local:** el laboratorio Docker permitió escribir Iceberg; la lectura SQL con Flink en ese laboratorio presentó un error de deserialización de lambda y no se considera validada. La comprobación final de los valores se realizó leyendo Parquet mediante PyArrow.
 - **Gobernanza:** conviene evolucionar hacia contratos de esquema versionados, validación de compatibilidad y controles de calidad de datos antes de uso productivo.
 - **Escalabilidad:** se utilizó paralelismo 1 y una carga pequeña; no se midieron tasas sostenidas, límites del conector ni costes por volumen.
-- **Repositorio y reproducibilidad:** los ZIP, artefactos Maven, cachés y respaldos experimentales se excluyen del control de versiones; `flink/application-pre05.zip` debe generarse antes del despliegue. Se documenta una prueba explícita desde un clon limpio, pendiente de ejecución antes del Pull Request.
+- **Repositorio y reproducibilidad:** los ZIP, artefactos Maven, cachés y respaldos experimentales se excluyen del control de versiones; `flink/application-pre05.zip` debe generarse antes del despliegue. Se aprobó una reconstrucción desde un clon limpio de `feature/lakehouse` con el commit `1c36634`. La verificación no incluye repetir la ejecución AWS con ese ZIP.
 
 ### Resultado de la Pre-entrega 05
 
 Se implementó y verificó el recorrido **Python/Boto3 → Kinesis Data Streams → Managed Apache Flink → Apache Iceberg en S3 → Amazon Athena**, con **AWS Glue Data Catalog** como catálogo de la tabla. La prueba confirmó el procesamiento de eventos y la escritura de dos filas agregadas con cantidad, suma y promedio correctos, respaldadas por metadatos Iceberg con `append`, motor `flink` y checkpoint 22.
 
-La consulta SQL de Athena también recuperó las dos filas esperadas. Las correcciones de compatibilidad se incorporaron al proyecto definitivo y se validaron localmente; el artefacto resultante quedó publicado en S3. El entorno permanece con streaming desactivado por defecto, con su infraestructura de prueba eliminada y los datos analíticos preservados.
+La consulta SQL de Athena también recuperó las dos filas esperadas. Las correcciones de compatibilidad se incorporaron al proyecto definitivo y se validaron localmente; el artefacto resultante quedó publicado en S3. Se **reconstruyó satisfactoriamente desde un clon limpio** de la rama `feature/lakehouse`, con validación de estructura, integridad y hashes. El entorno permanece con streaming desactivado por defecto, con su infraestructura de prueba eliminada y los datos analíticos preservados.
