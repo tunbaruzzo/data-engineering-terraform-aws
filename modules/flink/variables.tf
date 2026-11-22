@@ -64,3 +64,13 @@ variable "flink_artifact_version" {
   description = "Version del objeto ZIP almacenado en S3"
   type        = string
 }
+
+
+# ============================================================
+# AWS GLUE DATA CATALOG - PRE-ENTREGA 05
+# ============================================================
+
+variable "glue_database_arn" {
+  description = "ARN de la base de datos Lakehouse en AWS Glue"
+  type        = string
+}

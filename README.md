@@ -1,6 +1,6 @@
-# Data Engineering en AWS — Infraestructura e ingesta real-time
+# Data Engineering — Infraestructura, streaming y Lakehouse
 
-Proyecto de Data Engineering desarrollado mediante **Terraform (Infrastructure as Code)** sobre AWS. Se implementó progresivamente una infraestructura base y, sobre ella, un pipeline de ingesta de eventos en tiempo casi real hacia una zona **Bronze** en Amazon S3.
+Proyecto de Data Engineering desarrollado progresivamente mediante **Terraform (Infrastructure as Code)** sobre AWS y un laboratorio local con Kubernetes. Incluye infraestructura base, ingesta de eventos hacia **S3 Bronze**, procesamiento streaming con **Apache Flink** y una capa analítica **Lakehouse con Apache Iceberg, AWS Glue Data Catalog y S3**. Cada pre-entrega describe su alcance, validación y limitaciones.
 
 | Parámetro | Valor |
 |---|---|
@@ -9,6 +9,8 @@ Proyecto de Data Engineering desarrollado mediante **Terraform (Infrastructure a
 | Infraestructura como código | Terraform (HCL) |
 | Productor simulado | Python + Boto3 |
 | Almacenamiento de datos crudos | Amazon S3, prefijo `bronze/` |
+| Almacenamiento analítico | Apache Iceberg sobre S3, catálogo AWS Glue |
+| Procesamiento streaming | Apache Flink / PyFlink; laboratorio alternativo Kafka + Spark en Kubernetes |
 
 ## Pre-entrega 1 — Infraestructura base con Terraform y AWS
 
@@ -839,3 +841,294 @@ Se comprobó posteriormente que la consulta de aplicaciones Flink devolvía `[]`
 Se implementó y ejecutó un flujo de procesamiento de eventos con **Python/Boto3 → Kinesis Data Streams → Apache Flink**, basado en Event Time, watermarks, ventanas de un minuto, agregaciones stateful y checkpoints.
 
 La prueba en AWS permitió observar el funcionamiento del job administrado; la prueba local verificó automáticamente las agregaciones de cantidades, sumas y promedios. Se documentó explícitamente el alcance de cada validación y se limpiaron con Terraform los recursos temporales para controlar costos.
+
+---
+
+## Pre-entrega 05 — Lakehouse con Apache Iceberg, AWS Glue y Flink
+
+### Objetivo y alcance
+
+Extender el procesamiento de la Pre-entrega 04 con una salida analítica **persistente en formato Apache Iceberg**. Las transacciones llegan como JSON a **Amazon Kinesis Data Streams** y **Amazon Managed Service for Apache Flink** calcula métricas por ventanas; el resultado se escribe **directamente desde Flink a una tabla Iceberg almacenada en S3**, cuyo catálogo se administra mediante **AWS Glue Data Catalog**.
+
+La arquitectura contempla en paralelo el camino independiente **Kinesis → Firehose → S3 Bronze** para eventos crudos durante los despliegues de streaming. **No se utiliza un trabajo Glue ETL intermedio para la escritura de las métricas**. AWS Glue cumple el papel de catálogo de metadatos; no procesa estos eventos.
+
+### Arquitectura
+
+```mermaid
+flowchart TD
+    P["Productor Python / Boto3<br/>JSON de transacciones"] --> K["Kinesis Data Streams<br/>2 shards"]
+    K --> F["Managed Apache Flink<br/>PyFlink / Event Time"]
+    F --> W["Ventanas TUMBLE de 60 s<br/>Watermark: 10 s"]
+    W --> I["Iceberg sink<br/>COUNT / SUM / AVG"]
+    I --> S3["Amazon S3<br/>lakehouse/transaction_metrics/"]
+    I <--> G["AWS Glue Data Catalog<br/>lakehouse_db.transaction_metrics"]
+    G --> A["Amazon Athena<br/>Consulta SQL"]
+    S3 --> A
+    K --> FH["Amazon Data Firehose"]
+    FH --> B["Amazon S3 / Bronze<br/>Eventos crudos"]
+    F -.-> CW["CloudWatch Logs"]
+    TF["Terraform"] -.-> K
+    TF -.-> F
+    TF -.-> G
+```
+
+### Componentes, configuraciones y archivos
+
+| Componente | Implementación |
+|---|---|
+| Base y catálogo | `modules/lakehouse/`: base Glue `lakehouse_db` y tabla Iceberg `transaction_metrics` |
+| Almacenamiento | S3, prefijo `lakehouse/transaction_metrics/`; datos Parquet y metadatos Iceberg |
+| Procesamiento | `flink/main.py`: fuente Kinesis, tiempo de evento, agregaciones y sink directo Iceberg |
+| Entrada | Stream `data-engineering-dev-ingestion`, modo provisionado, 2 shards |
+| Ventanas | `WINDOW_SECONDS = 60` y `WATERMARK_SECONDS = 10` |
+| Métricas | `transaction_count`, `total_amount`, `average_amount`, agrupadas por ventana y `event_type` |
+| Catálogo | Glue Catalog, integrado con Iceberg y S3 |
+| Consulta SQL | Amazon Athena, catálogo `AwsDataCatalog`, base `lakehouse_db`, workgroup `primary` |
+| Permisos de consulta | `environments/dev/athena_query_iam.tf`: política IAM administrada y asociación al grupo `data-engineering-lab` |
+| Resultados de Athena | `s3://data-engineering-dev-047719648001/athena-results/pre05/` |
+| Dependencias del JAR | Iceberg 1.10.1, Hadoop 3.3.6, conector Kinesis `5.0.0-1.20`; compilación Java 11 |
+| Empaquetado | `flink/pom.xml` → `flink/target/pyflink-dependencies.jar`; `flink/build_package.py` → `flink/application-pre05.zip` |
+| Publicación del artefacto | `environments/dev/flink_artifact.tf` → S3 `artifacts/flink/application.zip` |
+| Infraestructura | `modules/flink/`, `modules/kinesis/`, `modules/lakehouse/`, `environments/dev/` |
+| Control de costos | `environments/dev/streaming_control.tf`, variable `enable_streaming` con valor predeterminado `false` |
+| Productor y pruebas | `scripts/producer_flink.py`, `tests/test_producer_flink.py` |
+
+El esquema de entrada JSON utilizado por Flink contiene `transaction_id`, `user_id`, `event_type`, `amount`, `currency` y `timestamp`. Este último llega como texto ISO-8601 UTC y se convierte a tiempo de evento (`event_time`). La aplicación utiliza `source.init.position = LATEST`; por ello, una nueva prueba debe publicar **eventos posteriores al inicio del job**.
+
+La tabla Iceberg mantiene las columnas `window_start`, `window_end`, `event_type`, `transaction_count`, `total_amount` y `average_amount`, con archivos de datos organizados bajo particiones de `window_day`.
+
+### Resolución de compatibilidad Java / Hadoop
+
+Durante el desarrollo se detectó un problema de carga de clases de Hadoop al inicializar Iceberg (`NoClassDefFoundError` relacionado con `org/apache/hadoop/conf/Configuration`). Se aisló la corrección en un laboratorio local y se integró finalmente en el Maven principal:
+
+- Clase Java de soporte en `flink/src/main/java/org/apache/flink/runtime/util/HadoopUtils.java`.
+- Compilación con `maven-compiler-plugin` para **Java 11** y dependencia `flink-core` con alcance `provided`.
+- Reubicación Maven Shade de `org.apache.hadoop.conf` a `shaded.org.apache.hadoop.conf`.
+- Reubicación de `org.apache.flink.runtime.util.HadoopUtils` a `shadow.org.apache.flink.runtime.util.HadoopUtils`.
+- Exclusión de `commons-cli` para evitar duplicación con el runtime.
+
+También se retiró una opción no soportada por el conector Kinesis utilizado (`scan.shard.idle.interval`), después de identificar una `ValidationException` de Flink. La aplicación pudo iniciar correctamente en AWS tras dicha corrección.
+
+**Alcance de las pruebas:** la ejecución de extremo a extremo en AWS se realizó con el paquete **experimental ya corregido**. Posteriormente, las mismas correcciones se incorporaron al `pom.xml` y al código definitivos: Maven finalizó en `BUILD SUCCESS`, se comprobaron las clases esenciales dentro del JAR, se validó la estructura e integridad del ZIP definitivo y se publicó ese ZIP en S3 mediante Terraform. **El ZIP definitivo no se volvió a ejecutar en AWS después de la consolidación**; no se afirma una segunda validación de extremo a extremo de ese artefacto.
+
+### Construcción y verificaciones locales
+
+Requisitos: Java y Maven compatibles con Java 11, Python disponible en un entorno virtual, Terraform y AWS CLI configurados para una cuenta autorizada. Las pruebas de PyFlink se realizaron con Python 3.11, Java 11 y la rama Flink 1.20.
+
+Desde la **raíz del repositorio**, en PowerShell:
+
+```powershell
+# Compilar el JAR con la configuración principal.
+mvn -f .\flink\pom.xml -DskipTests package
+
+# Construir el ZIP: main.py + lib/pyflink-dependencies.jar.
+python .\flink\build_package.py
+
+# Comprobar las clases principales del JAR.
+jar tf .\flink\target\pyflink-dependencies.jar | Select-String -Pattern "shadow/org/apache/flink/runtime/util/HadoopUtils.class|shaded/org/apache/hadoop/conf/Configuration.class|org/apache/iceberg/flink/FlinkCatalogFactory.class|org/apache/iceberg/aws/glue/GlueCatalog.class"
+
+# Ejecutar tests sin conectar el productor a AWS.
+python -m unittest discover -s .\tests -p "test_*.py" -v
+```
+
+**Resultados verificados en el directorio de desarrollo:** `BUILD SUCCESS`, paquete ZIP con estructura/integridad/hashes correctos y **10 tests automatizados exitosos**. Las pruebas incluyen campos requeridos, tipos, rangos de importes, serialización y fecha UTC; además, casos negativos para campos faltantes, montos inválidos, tipo de evento desconocido y fechas inválidas.
+
+El archivo `flink/application-pre05.zip` se genera localmente y está excluido de Git. **Debe reconstruirse antes de un `terraform plan` que lea su hash**. Los archivos experimentales y copias de seguridad no forman parte de la entrega final.
+
+### Prueba de reproducibilidad desde un clon limpio
+
+**Propósito:** demostrar que un tercero puede obtener un repositorio limpio y reconstruir `flink/application-pre05.zip` sin copiar el JAR ni el ZIP de la máquina de desarrollo. Este control responde a la observación recibida en la Pre-entrega 04 sobre la reconstrucción del artefacto a partir del repositorio.
+
+**Requisitos locales:** Git, Maven, JDK 11 compatible, Python 3.11 y conexión a Internet para resolver las dependencias Maven/Python. Esta validación **no requiere acceso a AWS, Terraform apply ni iniciar servicios facturables**.
+
+Ejecutar **después de realizar el commit de la rama `feature/lakehouse`**, desde la raíz del repositorio original. La ruta `..\pre05-clon-limpio` debe estar libre antes de ejecutar el comando:
+
+```powershell
+# Clonar solamente archivos versionados de la rama de entrega.
+git clone --no-hardlinks --branch feature/lakehouse . ..\pre05-clon-limpio
+Set-Location ..\pre05-clon-limpio
+
+# Confirmar que el artefacto y el JAR no vienen incluidos en Git.
+if (Test-Path .\flink\application-pre05.zip) { throw "El ZIP ya estaba en el clon" }
+if (Test-Path .\flink\target\pyflink-dependencies.jar) { throw "El JAR ya estaba en el clon" }
+
+# Generar artefactos exclusivamente a partir del código del clon.
+mvn -f .\flink\pom.xml -DskipTests package
+if ($LASTEXITCODE -ne 0) { throw "Falló la compilación Maven" }
+
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python .\flink\build_package.py
+if ($LASTEXITCODE -ne 0) { throw "Falló la construcción del ZIP" }
+
+# Verificar la existencia e integridad del ZIP, así como sus dos entradas.
+python -c "import zipfile; p='flink/application-pre05.zip'; z=zipfile.ZipFile(p); assert z.testzip() is None; assert {'main.py','lib/pyflink-dependencies.jar'}.issubset(z.namelist()); print('ZIP RECONSTRUIDO Y VALIDADO DESDE CLON LIMPIO')"
+if ($LASTEXITCODE -ne 0) { throw "Falló la comprobación del ZIP" }
+
+git status --short
+```
+
+**Criterios de aceptación:** (1) el clon inicialmente no contiene JAR ni ZIP generados; (2) Maven devuelve `BUILD SUCCESS`; (3) `build_package.py` genera el ZIP; (4) la comprobación de integridad confirma `main.py` y `lib/pyflink-dependencies.jar`; (5) `git status --short` no muestra artefactos generados sin seguimiento. La caché de dependencias de Maven puede seguir siendo compartida con el equipo local: se comprueba la independencia de **archivos del repositorio**, no de la red ni del caché de Maven.
+
+**Estado de esta prueba:** pendiente de ejecutar sobre el commit definitivo de `feature/lakehouse`. No se declara superada hasta observar los resultados. Una vez validada, guardar la captura como `evidencias/preentrega-05/10_reproducibilidad_clon_limpio.png` y actualizar este párrafo con el resultado real antes de publicar el Pull Request.
+
+### Prueba real de extremo a extremo en AWS (19/11/2026)
+
+Se desplegaron temporalmente los recursos con Terraform, se inició Managed Flink y se enviaron **seis eventos sintéticos** a Kinesis con Boto3, distribuidos de manera explícita entre los dos shards: **tres en el shard 0 y tres en el shard 1**.
+
+Cuatro transacciones correspondían a una ventana anterior; dos eventos adicionales, con timestamps posteriores, ayudaron al avance de los watermarks. Se utilizaron los tipos `compra` y `recarga` para verificar las agrupaciones. El tipo `recarga` fue parte de esta **prueba manual**: el productor habitual `scripts/producer_flink.py` genera y valida `compra`, `pago` y `devolucion`. El campo `event_type` del esquema de lectura de Flink admite texto y no restringe por sí mismo esos valores.
+
+**Resultados comprobados en la ventana UTC `2026-11-19 19:35:00`–`19:36:00`:**
+
+| Tipo | `transaction_count` | `total_amount` (ARS) | `average_amount` (ARS) |
+|---|---:|---:|---:|
+| `compra` | 3 | 4.500,00 | 1.500,00 |
+| `recarga` | 1 | 1.000,00 | 1.000,00 |
+
+La lectura del archivo Parquet con PyArrow confirmó estos valores. Los **dos registros** de Iceberg son **dos filas agregadas**, no dos eventos de entrada. No se verificó la persistencia de una segunda ventana para los dos eventos enviados al final.
+
+Además se verificó:
+
+- El job de Managed Flink alcanzó `RUNNING` antes del envío de eventos.
+- La tabla `lakehouse_db.transaction_metrics` estaba registrada en Glue y apuntaba a un archivo `metadata.json` de Iceberg en S3.
+- El metadato Iceberg contenía **tres snapshots**, con operación actual `append`, **dos registros**, un archivo Parquet de **1.990 bytes** y `engine-name: flink`.
+- El snapshot registró `flink.max-committed-checkpoint-id: 22`: evidencia del commit de resultados vinculado al checkpoint.
+- La aplicación fue detenida y regresó a `READY` antes de la limpieza de recursos.
+
+**Comprobaciones de consulta sin reiniciar Flink:**
+
+```powershell
+# Metadatos del catálogo (con credenciales AWS autorizadas).
+aws glue get-table --database-name lakehouse_db --name transaction_metrics --region us-east-1 --query "Table.{location:StorageDescriptor.Location,metadata:Parameters.metadata_location}" --output json
+
+# Listar archivos persistidos en S3. Sustituir BUCKET_DATOS.
+aws s3 ls "s3://BUCKET_DATOS/lakehouse/transaction_metrics/" --recursive --region us-east-1
+```
+
+Para validar los datos de una tabla Iceberg en general debe respetarse el snapshot actual y sus manifiestos; un listado de S3 por sí solo **no** identifica necesariamente los archivos vigentes cuando existen varios snapshots. En esta prueba se consultó el snapshot y se leyó el único archivo Parquet de datos localizado, concordante con el único archivo de datos del snapshot actual.
+
+### Evidencias de la Pre-entrega 05
+
+Las capturas se ubican en `evidencias/preentrega-05/` y se presentan en el orden del flujo y las validaciones. No fue necesario recrear servicios de AWS para obtener capturas adicionales después de la limpieza.
+
+#### 1. Datos agregados escritos en Iceberg
+
+![Métricas de compra y recarga leídas del Parquet de Iceberg](evidencias/preentrega-05/01_iceberg_metricas_validadas.png)
+
+#### 2. Snapshot y checkpoint de Flink
+
+![Commit append de Flink en Iceberg, dos registros y checkpoint 22](evidencias/preentrega-05/02_iceberg_snapshot_flink.png)
+
+#### 3. Respaldo local de logs CloudWatch
+
+![Archivo de respaldo de CloudWatch guardado fuera del repositorio](evidencias/preentrega-05/03_cloudwatch_respaldo_logs.png)
+
+Se guardó una copia del registro completo de CloudWatch en una carpeta **privada fuera del repositorio**. Esa copia puede contener identificadores operativos y **no** se publica en Git. La captura demuestra la existencia del respaldo, no constituye por sí sola una prueba de ausencia de errores.
+
+#### 4. Publicación Terraform del paquete definitivo
+
+![Terraform actualizó el ZIP definitivo en S3](evidencias/preentrega-05/04_terraform_zip_definitivo_s3.png)
+
+#### 5. Terraform sin cambios con streaming desactivado
+
+![Plan Terraform sin cambios para el entorno conservado](evidencias/preentrega-05/05_terraform_no_changes_streaming_off.png)
+
+#### 6. Pruebas automáticas
+
+![Diez pruebas de esquema y validación del productor aprobadas](evidencias/preentrega-05/06_tests_productor_flink.png)
+
+#### 7. Envío a los dos shards de Kinesis
+
+![Seis eventos aceptados y distribuidos entre los dos shards](evidencias/preentrega-05/07_kinesis_eventos_dos_shards.png)
+
+#### 8. Registro de la tabla Iceberg en Glue Data Catalog
+
+![Tabla Iceberg registrada en AWS Glue](evidencias/preentrega-05/08_glue_catalog_tabla_iceberg.png)
+
+La consulta `aws glue get-table` confirmó `lakehouse_db.transaction_metrics`, tipo `ICEBERG` y ubicación de los datos en S3. Esta verificación del catálogo es independiente de la consulta posterior de filas en Athena.
+
+#### 9. Consulta SQL exitosa desde Amazon Athena (22/11/2026)
+
+![Athena consulta la tabla Iceberg y devuelve dos filas](evidencias/preentrega-05/09_athena_consulta_iceberg.png)
+
+Se ejecutó `SELECT` sobre `AwsDataCatalog.lakehouse_db.transaction_metrics` en el workgroup `primary` y se recuperaron **dos filas agregadas**: `compra` (3 transacciones, total 4.500, promedio 1.500) y `recarga` (1 transacción, total 1.000, promedio 1.000). La consola informó **Completado**, **650 ms de ejecución** y **0,36 KB analizados**. Esto valida la lectura SQL de Iceberg desde Athena mediante el catálogo Glue, sin reiniciar Kinesis ni Flink.
+
+```sql
+SELECT
+    window_start,
+    window_end,
+    event_type,
+    transaction_count,
+    total_amount,
+    average_amount
+FROM lakehouse_db.transaction_metrics
+ORDER BY window_start, event_type
+LIMIT 10;
+```
+
+El editor de Athena utilizó `s3://data-engineering-dev-047719648001/athena-results/pre05/` como ubicación de resultados. Los permisos se incorporaron mediante Terraform en `environments/dev/athena_query_iam.tf`, usando una **política IAM administrada** asociada al grupo `data-engineering-lab`: el intento inicial de crear una política *inline* adicional había superado el límite total de 5.120 caracteres de políticas inline del grupo. La solución final creó **2 recursos (política y asociación)** sin modificar ni eliminar otros recursos.
+
+#### 10. Reconstrucción del ZIP desde un clon limpio
+
+La evidencia `10_reproducibilidad_clon_limpio.png` se agregará únicamente después de ejecutar y aprobar el procedimiento de reproducibilidad descrito anteriormente. **Pendiente de verificación; no se presenta como resultado ya obtenido.**
+
+No se conserva una captura independiente del estado `RUNNING` de esta ejecución: se observó el estado por AWS CLI durante la prueba, pero no se documenta aquí como evidencia gráfica adicional.
+
+### Operación reproducible con Terraform y control de costos
+
+La variable `enable_streaming`, definida en `environments/dev/streaming_control.tf`, tiene como valor predeterminado `false`. Por tanto, un plan normal del entorno DEV **no debe volver a crear** Kinesis o Flink. El código de ambos módulos se conserva para volver a ejecutar una prueba cuando se habiliten explícitamente.
+
+Secuencia de referencia **solo para una nueva prueba autorizada** (desde `environments/dev`, luego de construir el ZIP y autenticar AWS):
+
+```powershell
+# El despliegue crea recursos facturables: revisar el plan antes de aplicar.
+$env:TF_VAR_enable_streaming = "true"
+terraform init
+terraform validate
+terraform --% plan -out=.terraform/pre05-streaming-on.tfplan
+# Revisar los recursos del plan antes de continuar:
+terraform show -no-color ".terraform/pre05-streaming-on.tfplan"
+# Solo si la revisión es correcta:
+terraform apply ".terraform/pre05-streaming-on.tfplan"
+
+# Iniciar la aplicación desplegada sin restaurar un snapshot anterior.
+aws kinesisanalyticsv2 start-application --application-name data-engineering-dev-flink --run-configuration "ApplicationRestoreConfiguration={ApplicationRestoreType=SKIP_RESTORE_FROM_SNAPSHOT}" --region us-east-1
+```
+
+Confirmar `RUNNING` antes de enviar eventos. Los eventos deben tener timestamps UTC recientes y ser posteriores al inicio cuando la fuente utiliza `LATEST`. El productor habitual requiere credenciales/perfil autorizado y, por defecto, envía 90 transacciones; **la prueba controlada de seis eventos del 19/11 fue un envío específico de laboratorio, no una ejecución de 90 eventos del productor habitual**.
+
+Para retirar los componentes de la prueba, primero detener Managed Flink y verificar su estado `READY`. Guardar antes los registros CloudWatch que se quieran conservar. Después desactivar el streaming y generar **un plan normal** para que Terraform proponga retirar los recursos de esos módulos, revisándolo antes de aplicarlo:
+
+```powershell
+aws kinesisanalyticsv2 stop-application --application-name data-engineering-dev-flink --region us-east-1
+# Verificar posteriormente que ApplicationStatus sea READY.
+aws kinesisanalyticsv2 describe-application --application-name data-engineering-dev-flink --region us-east-1 --query "ApplicationDetail.ApplicationStatus" --output text
+
+$env:TF_VAR_enable_streaming = "false"
+terraform --% plan -out=.terraform/pre05-streaming-off.tfplan
+terraform show -no-color ".terraform/pre05-streaming-off.tfplan"
+# Aplicar solamente después de confirmar la lista de eliminaciones:
+terraform apply ".terraform/pre05-streaming-off.tfplan"
+```
+
+En la ejecución documentada, antes de incorporar el interruptor, se revisó y aplicó un plan de limpieza selectiva de los módulos Flink y Kinesis: **13 recursos destruidos, 0 agregados y 0 modificados**. El control posterior mediante `terraform state list` confirmó que esos módulos ya no tenían recursos en el estado. El catálogo Glue, los datos Iceberg en S3 y la infraestructura base se conservaron. Posteriormente se publicó el **ZIP definitivo** en S3 con `0 added, 1 changed, 0 destroyed` y el plan final confirmó **`No changes`** con el streaming desactivado.
+
+> **Costos y seguridad:** Kinesis provisionado y Managed Flink pueden generar cargos incluso con tráfico bajo. La limpieza de estos módulos no garantiza una cuenta sin costos: S3, logs, claves KMS administradas por el cliente u otros recursos conservados podrían facturar por separado. Revisar AWS Billing al concluir el proyecto. Mantener permisos IAM en Terraform, usar datos ficticios y no incorporar credenciales ni logs completos al repositorio.
+
+### Consideraciones, limitaciones y evolución
+
+- **Resultado E2E:** se verificó una ventana con dos filas agregadas; no se ensayaron cargas elevadas ni múltiples días de operación.
+- **Artefacto final:** el ZIP definitivo quedó compilado, verificado y publicado, pero no se volvió a ejecutar en AWS tras la consolidación del experimento. La ejecución AWS corresponde al paquete experimental corregido.
+- **Watermarks y shards inactivos:** el conector Kinesis no aceptó la opción de inactividad que se había usado inicialmente; quedan pendientes pruebas específicas de particiones o shards inactivos y eventos tardíos.
+- **Tolerancia a fallos:** se observaron commits vinculados a checkpoints, pero no se ensayó recuperación del job después de un fallo ni restauración desde snapshot.
+- **Pruebas:** los 10 tests automatizados validan el productor y su esquema, pero no sustituyen una prueba E2E automatizada con infraestructura AWS desplegada.
+- **Lectura local:** el laboratorio Docker permitió escribir Iceberg; la lectura SQL con Flink en ese laboratorio presentó un error de deserialización de lambda y no se considera validada. La comprobación final de los valores se realizó leyendo Parquet mediante PyArrow.
+- **Gobernanza:** conviene evolucionar hacia contratos de esquema versionados, validación de compatibilidad y controles de calidad de datos antes de uso productivo.
+- **Escalabilidad:** se utilizó paralelismo 1 y una carga pequeña; no se midieron tasas sostenidas, límites del conector ni costes por volumen.
+- **Repositorio y reproducibilidad:** los ZIP, artefactos Maven, cachés y respaldos experimentales se excluyen del control de versiones; `flink/application-pre05.zip` debe generarse antes del despliegue. Se documenta una prueba explícita desde un clon limpio, pendiente de ejecución antes del Pull Request.
+
+### Resultado de la Pre-entrega 05
+
+Se implementó y verificó el recorrido **Python/Boto3 → Kinesis Data Streams → Managed Apache Flink → Apache Iceberg en S3 → Amazon Athena**, con **AWS Glue Data Catalog** como catálogo de la tabla. La prueba confirmó el procesamiento de eventos y la escritura de dos filas agregadas con cantidad, suma y promedio correctos, respaldadas por metadatos Iceberg con `append`, motor `flink` y checkpoint 22.
+
+La consulta SQL de Athena también recuperó las dos filas esperadas. Las correcciones de compatibilidad se incorporaron al proyecto definitivo y se validaron localmente; el artefacto resultante quedó publicado en S3. El entorno permanece con streaming desactivado por defecto, con su infraestructura de prueba eliminada y los datos analíticos preservados.

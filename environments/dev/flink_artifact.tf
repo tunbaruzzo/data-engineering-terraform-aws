@@ -1,31 +1,29 @@
-
 # ============================================================
 # ARTEFACTO S3 - APACHE FLINK
-# PRE-ENTREGA 04 - DATA ENGINEERING
+# PRE-ENTREGA 05 - EXPERIMENTO ICEBERG / HADOOP
 # ============================================================
 
-# Publica el paquete de la aplicacion Flink en el
-# bucket S3 existente del entorno DEV.
+# Publica el paquete de Flink en el bucket S3 de DEV.
 #
-# El ZIP se genera localmente y contiene:
+# ZIP experimental validado:
 # - main.py
 # - lib/pyflink-dependencies.jar
+#
+# La publicacion se realizara mediante Terraform.
 
 resource "aws_s3_object" "flink_application" {
 
-  # Reutilizamos el bucket del modulo Storage.
+  # Reutilizar el bucket del modulo Storage.
   bucket = module.storage.data_bucket_name
 
-  # Ubicacion del artefacto dentro de S3.
+  # Mantener la ubicacion del artefacto en S3.
   key = "artifacts/flink/application.zip"
 
-  # Archivo local que Terraform subira al bucket.
-  source = "${path.module}/../../flink/application.zip"
+  # Paquete definitivo de Flink con integracion Apache Iceberg.
+  source = "${path.module}/../../flink/application-pre05.zip"
 
-  # Detecta cambios en el contenido del ZIP.
-  source_hash = filemd5(
-    "${path.module}/../../flink/application.zip"
-  )
+  # Detectar cambios en el paquete para actualizar el artefacto.
+  source_hash = filemd5("${path.module}/../../flink/application-pre05.zip")
 
   # Tipo de archivo.
   content_type = "application/zip"

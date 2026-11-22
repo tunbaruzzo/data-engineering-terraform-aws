@@ -90,3 +90,87 @@ resource "aws_iam_group_policy" "flink_management" {
     ]
   })
 }
+
+
+# ============================================================
+# CONSULTA DE COSTOS AWS - SOLO LECTURA
+# ============================================================
+
+resource "aws_iam_group_policy" "billing_readonly" {
+
+  name  = "DataEngineeringBillingReadOnly"
+  group = "data-engineering-lab"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Sid    = "ReadCostExplorer"
+        Effect = "Allow"
+
+        Action = [
+          "ce:GetCostAndUsage"
+        ]
+
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+
+# ============================================================
+# AWS GLUE - ADMINISTRACION DEL LAKEHOUSE DESDE TERRAFORM
+# ============================================================
+
+resource "aws_iam_group_policy" "glue_deployer" {
+
+  name  = "DataEngineeringGlueDeployer"
+  group = "data-engineering-lab"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Sid    = "ManageLakehouseDatabase"
+        Effect = "Allow"
+
+        Action = [
+          "glue:CreateDatabase",
+          "glue:GetDatabase",
+          "glue:GetDatabases",
+          "glue:DeleteDatabase",
+          "glue:GetTags",
+          "glue:TagResource",
+          "glue:UntagResource"
+        ]
+
+        Resource = [
+          "arn:aws:glue:us-east-1:${data.aws_caller_identity.current.account_id}:catalog",
+          "arn:aws:glue:us-east-1:${data.aws_caller_identity.current.account_id}:database/lakehouse_db"
+        ]
+      },
+      {
+        Sid    = "ManageLakehouseTables"
+        Effect = "Allow"
+
+        Action = [
+          "glue:CreateTable",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:SearchTables",
+          "glue:UpdateTable",
+          "glue:DeleteTable"
+        ]
+
+        Resource = [
+          "arn:aws:glue:us-east-1:${data.aws_caller_identity.current.account_id}:catalog",
+          "arn:aws:glue:us-east-1:${data.aws_caller_identity.current.account_id}:database/lakehouse_db",
+          "arn:aws:glue:us-east-1:${data.aws_caller_identity.current.account_id}:table/lakehouse_db/*"
+        ]
+      }
+    ]
+  })
+}

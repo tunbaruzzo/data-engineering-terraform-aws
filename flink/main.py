@@ -1,11 +1,51 @@
 
 # ============================================================
 # PROCESAMIENTO EN TIEMPO REAL - APACHE FLINK
-# PRE-ENTREGA 04 - DATA ENGINEERING
+# PRE-ENTREGAS 04 Y 05 - DATA ENGINEERING
 # ============================================================
 
 import json
 import os
+from pathlib import Path
+
+
+# ============================================================
+# CONFIGURACION TEMPRANA DE HADOOP
+# PRE-ENTREGA 05 - DATA ENGINEERING
+# ============================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def configure_hadoop_classpath():
+    """
+    Preparar Hadoop antes de inicializar la JVM de PyFlink.
+
+    Solo para pruebas locales. En AWS Managed Flink
+    el runtime Java puede estar iniciado previamente.
+
+    Esta funcion NO constituye una correccion del
+    ClassLoader administrado de AWS.
+    """
+
+    if os.environ.get("IS_LOCAL") != "true":
+        return
+
+    jar_path = (
+        BASE_DIR / "target" / "pyflink-dependencies.jar"
+    )
+
+    if not jar_path.is_file():
+        raise FileNotFoundError(
+            f"No se encontro el JAR: {jar_path}"
+        )
+
+    os.environ["HADOOP_CLASSPATH"] = str(jar_path)
+
+
+# Configurar antes de importar e inicializar PyFlink.
+configure_hadoop_classpath()
+
 
 from pyflink.table import EnvironmentSettings, TableEnvironment
 
@@ -15,6 +55,7 @@ from pyflink.table import EnvironmentSettings, TableEnvironment
 # ============================================================
 
 AWS_REGION = "us-east-1"
+
 STREAM_ARN = os.environ.get(
     "FLINK_STREAM_ARN",
     "arn:aws:kinesis:us-east-1:000000000000:"
@@ -22,7 +63,7 @@ STREAM_ARN = os.environ.get(
 )
 
 # La ARN anterior es un placeholder para desarrollo.
-# En AWS se obtendra desde propiedades de ejecucion.
+# En AWS se obtiene desde propiedades de ejecucion.
 
 WINDOW_SECONDS = 60
 WATERMARK_SECONDS = 10
@@ -37,12 +78,19 @@ def get_stream_config():
     properties_path = "/etc/flink/application_properties.json"
 
     if os.path.isfile(properties_path):
-        with open(properties_path, encoding="utf-8") as file:
+
+        with open(
+            properties_path,
+            encoding="utf-8"
+        ) as file:
             properties = json.load(file)
 
         for group in properties:
+
             if group["PropertyGroupId"] == "InputStream0":
+
                 config = group["PropertyMap"]
+
                 return (
                     config["stream.arn"],
                     config["aws.region"]
@@ -50,13 +98,57 @@ def get_stream_config():
 
         raise ValueError("Falta el grupo InputStream0")
 
-    # Valores locales para la etapa de desarrollo.
+    # Configuracion local.
     if "FLINK_STREAM_ARN" not in os.environ:
         raise ValueError(
             "Definir FLINK_STREAM_ARN para pruebas locales"
         )
 
     return STREAM_ARN, AWS_REGION
+
+
+# ============================================================
+# OBTENER CONFIGURACION DEL LAKEHOUSE
+# PRE-ENTREGA 05 - DATA ENGINEERING
+# ============================================================
+
+def get_lakehouse_config():
+
+    properties_path = "/etc/flink/application_properties.json"
+
+    if os.path.isfile(properties_path):
+
+        with open(
+            properties_path,
+            encoding="utf-8"
+        ) as file:
+            properties = json.load(file)
+
+        for group in properties:
+
+            if group["PropertyGroupId"] == "LakehouseConfig":
+
+                config = group["PropertyMap"]
+
+                return (
+                    config["catalog.database"],
+                    config["catalog.warehouse"],
+                    config["aws.region"]
+                )
+
+        raise ValueError("Falta el grupo LakehouseConfig")
+
+    # Configuracion local para pruebas.
+    database = os.environ.get("GLUE_DATABASE")
+    warehouse = os.environ.get("ICEBERG_WAREHOUSE")
+
+    if not database or not warehouse:
+        raise ValueError(
+            "Definir GLUE_DATABASE e ICEBERG_WAREHOUSE "
+            "para pruebas locales"
+        )
+
+    return database, warehouse, AWS_REGION
 
 
 # ============================================================
@@ -74,37 +166,67 @@ def main():
         "table.local-time-zone", "UTC"
     )
 
-    # Un unico proceso paralelo para las pruebas iniciales.
+    # Un unico proceso paralelo para pruebas iniciales.
     table_env.get_config().set(
         "parallelism.default", "1"
     )
 
-    # Cargar el conector Kinesis para ejecucion local.
+    # ========================================================
+    # DEPENDENCIAS JAVA PARA EJECUCION LOCAL
+    # ========================================================
+
     if os.environ.get("IS_LOCAL") == "true":
-        jar_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "target",
-            "pyflink-dependencies.jar"
+
+        jar_path = (
+            BASE_DIR / "target" / "pyflink-dependencies.jar"
         )
 
         table_env.get_config().set(
             "pipeline.jars",
-            "file:///" + jar_path.replace("\\", "/")
+            jar_path.as_uri()
         )
 
+    # ========================================================
+    # CONFIGURACION DEL STREAM
+    # ========================================================
+
     stream_arn, region = get_stream_config()
+
+    # ========================================================
+    # CATALOGO ICEBERG - AWS GLUE DATA CATALOG
+    # PRE-ENTREGA 05
+    # ========================================================
+
+    database, warehouse, lakehouse_region = (
+        get_lakehouse_config()
+    )
+
+    # Registrar el catalogo Iceberg respaldado por Glue.
+    table_env.execute_sql(f"""
+        CREATE CATALOG glue_catalog WITH (
+            'type' = 'iceberg',
+            'catalog-impl' = 'org.apache.iceberg.aws.glue.GlueCatalog',
+            'warehouse' = '{warehouse}',
+            'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',
+            'client.region' = '{lakehouse_region}'
+        )
+    """)
+
+    # Mantener Kinesis en el catalogo temporal de Flink.
+    table_env.use_catalog("default_catalog")
+    table_env.use_database("default_database")
 
     # ========================================================
     # TABLA DE ORIGEN - KINESIS
     # ========================================================
 
-    # El timestamp original llega como texto ISO-8601 UTC.
-    # Se convierte a Event Time usando segundos UTC.
-    # En esta primera version se descartan las fracciones
-    # de segundo. El productor actual siempre utiliza UTC.
+    # El timestamp original llega como ISO-8601 UTC.
+    # Se convierte a Event Time utilizando segundos UTC.
+    # Las fracciones de segundo se descartan en esta
+    # version, como en la Pre-entrega 04.
 
     table_env.execute_sql(f"""
-        CREATE TABLE transactions (
+        CREATE TEMPORARY TABLE transactions (
             transaction_id STRING,
             user_id STRING,
             event_type STRING,
@@ -136,29 +258,11 @@ def main():
     """)
 
     # ========================================================
-    # TABLA DE RESULTADOS - DIAGNOSTICO
-    # ========================================================
-
-    table_env.execute_sql("""
-        CREATE TABLE transaction_metrics (
-            window_start TIMESTAMP(3),
-            window_end TIMESTAMP(3),
-            event_type STRING,
-            transaction_count BIGINT,
-            total_amount DOUBLE,
-            average_amount DOUBLE
-
-        ) WITH (
-            'connector' = 'print'
-        )
-    """)
-
-    # ========================================================
     # AGREGACION STATEFUL POR VENTANA
     # ========================================================
 
     query = f"""
-        INSERT INTO transaction_metrics
+        INSERT INTO glue_catalog.{database}.transaction_metrics
 
         SELECT
             window_start,
@@ -176,16 +280,21 @@ def main():
             )
         )
 
+        WHERE event_type IS NOT NULL
+
         GROUP BY
             window_start,
             window_end,
             event_type
     """
 
-    # Iniciar la ejecucion del procesamiento.
+    # ========================================================
+    # EJECUCION
+    # ========================================================
+
     result = table_env.execute_sql(query)
 
-    # Evitar que termine el proceso en pruebas locales.
+    # Evitar que el proceso termine en pruebas locales.
     if os.environ.get("IS_LOCAL") == "true":
         result.wait()
 

@@ -148,7 +148,74 @@ resource "aws_iam_role_policy" "flink_permissions" {
         ]
 
         Resource = local.flink_log_stream_arn
+      },
+
+
+      # ------------------------------------------------------
+      # AWS GLUE - CATALOGO Y TABLAS ICEBERG
+      # ------------------------------------------------------
+
+      {
+        Sid    = "ManageLakehouseCatalog"
+        Effect = "Allow"
+
+        Action = [
+          "glue:GetDatabase",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:CreateTable",
+          "glue:UpdateTable"
+        ]
+
+        Resource = [
+          "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.current.account_id}:catalog",
+          var.glue_database_arn,
+          "${replace(var.glue_database_arn, ":database/", ":table/")}/*"
+        ]
+      },
+
+      # ------------------------------------------------------
+      # S3 - LISTAR OBJETOS DEL LAKEHOUSE
+      # ------------------------------------------------------
+
+      {
+        Sid    = "ListLakehouseObjects"
+        Effect = "Allow"
+
+        Action = [
+          "s3:ListBucket"
+        ]
+
+        Resource = var.data_bucket_arn
+
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "lakehouse",
+              "lakehouse/",
+              "lakehouse/*"
+            ]
+          }
+        }
+      },
+
+      # ------------------------------------------------------
+      # S3 - LECTURA Y ESCRITURA DE TABLAS ICEBERG
+      # ------------------------------------------------------
+
+      {
+        Sid    = "ManageLakehouseObjects"
+        Effect = "Allow"
+
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+
+        Resource = "${var.data_bucket_arn}/lakehouse/*"
       }
+
     ]
   })
 }

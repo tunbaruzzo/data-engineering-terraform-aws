@@ -74,3 +74,13 @@ flink/target/
 # Artefactos de empaquetado de Apache Flink.
 flink/package/
 flink/application.zip
+
+# ============================================================
+# APACHE FLINK - ARTEFACTOS DE PRE-ENTREGAS
+# ============================================================
+
+# Compilaciones experimentales de Maven.
+flink/target-experiment/
+
+# ZIP generados para pruebas y despliegues AWS.
+flink/application-pre*.zip
