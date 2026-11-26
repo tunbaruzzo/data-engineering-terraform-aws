@@ -687,3 +687,155 @@ Se implementó y validó un pipeline funcional de eventos urbanos:
 La solución recibe mediciones simuladas, las distribuye mediante un tópico de Kafka con tres particiones y calcula promedios de temperatura y calidad del aire por sensor en ventanas de un minuto.
 
 Los manifiestos Kubernetes, Dockerfiles y scripts permiten reconstruir el entorno local siguiendo los pasos documentados.
+
+---
+
+## Pre-entrega 4 — Procesamiento streaming con Apache Flink en AWS
+
+### Objetivo
+
+Incorporar procesamiento *stateful* sobre los eventos de transacciones recibidos por **Amazon Kinesis Data Streams**, utilizando **Amazon Managed Service for Apache Flink** y una aplicación **PyFlink**. El ejercicio trabaja con tiempo de evento (*Event Time*), *watermarks*, ventanas temporales y *checkpoints*, manteniendo la infraestructura declarada en Terraform.
+
+Esta etapa reutiliza la ingesta de la Pre-entrega 02. A diferencia de Firehose, cuyo propósito es entregar eventos crudos a S3 Bronze, Flink procesa y agrega eventos del stream. Ambos consumidores cumplen funciones distintas.
+
+### Arquitectura
+
+```mermaid
+flowchart TD
+    P["Productor Python / Boto3<br/>90 transacciones ficticias"] --> K["Kinesis Data Streams<br/>2 shards - PROVISIONED"]
+    K --> F["Amazon Managed Service for Apache Flink<br/>PyFlink 1.20"]
+    F --> W["Event Time + watermarks<br/>Ventanas TUMBLE de 60 s"]
+    W --> A["Agregaciones por tipo<br/>COUNT / SUM / AVG"]
+    A --> O["Sink de diagnóstico<br/>conector print"]
+    K --> FH["Amazon Data Firehose"]
+    FH --> S3["Amazon S3 - Bronze"]
+    F -.-> C["CloudWatch / métricas y logs"]
+    TF["Terraform"] -.-> K
+    TF -.-> F
+    TF -.-> FH
+```
+
+**Importante:** la salida `print` es un mecanismo de diagnóstico; **no** persiste las agregaciones en S3 ni constituye una tabla analítica permanente. La escritura de resultados finales en AWS no se confirmó directamente durante esta ejecución.
+
+### Componentes implementados
+
+| Componente | Función / configuración |
+|---|---|
+| `modules/flink` | Módulo Terraform para la aplicación administrada, permisos y logging. |
+| `environments/dev` | Integración del módulo Flink con el stream Kinesis y los recursos existentes. |
+| Amazon Managed Service for Apache Flink | Aplicación `data-engineering-dev-flink`, runtime Flink 1.20, paralelismo 1 y autoescalado desactivado durante las pruebas. |
+| Kinesis Data Streams | Stream `data-engineering-dev-ingestion`, dos shards provisionados y retención de 24 horas. |
+| Artefacto de ejecución | ZIP de la aplicación PyFlink almacenado en S3 bajo `artifacts/flink/application.zip`. |
+| Productor | `scripts/producer_flink.py`, transacciones ficticias en JSON enviadas mediante Boto3. |
+| Procesamiento | Ventanas `TUMBLE` de 60 segundos por `event_type`. |
+| Métricas calculadas | Cantidad de transacciones, monto total y monto promedio (`COUNT`, `SUM`, `AVG`). |
+| Salida | Tabla `transaction_metrics` con conector `print` para diagnóstico. |
+| Tolerancia a fallos | Checkpoints habilitados, con intervalo configurado de 60 segundos. |
+| Prueba local | `flink/test_windows.py`, ejecución PyFlink en modo *batch* con validación automática. |
+
+### Lógica de procesamiento
+
+Los eventos simulados incluyen un identificador de transacción, identificador de usuario, tipo de evento (`compra`, `pago`, `devolucion`), importe, moneda y timestamp UTC.
+
+La aplicación toma el timestamp del evento para definir su tiempo de procesamiento lógico (*Event Time*) y utiliza *watermarks* para determinar el avance temporal del stream. Después agrupa los registros en ventanas no solapadas de un minuto mediante `TUMBLE` y, para cada `event_type`, calcula:
+
+- `transaction_count`: cantidad de registros en la ventana.
+- `total_amount`: suma de los importes.
+- `average_amount`: promedio de los importes.
+
+Estas agregaciones mantienen estado mientras se construye el resultado de cada ventana. El progreso observado de los *watermarks* en AWS permite confirmar que el mecanismo temporal estaba activo, aunque la captura no constituye una prueba de emisión de todas las ventanas al sink.
+
+### Pruebas y resultados
+
+#### 1. Ejecución de la aplicación administrada
+
+Se desplegó la aplicación mediante Terraform y se ejecutó temporalmente en AWS. En el Dashboard de Flink se observó el grafo de operadores, incluyendo lectura de transacciones, asignación de *watermarks* y agregaciones de ventana.
+
+La captura muestra **27 registros intermedios** en el flujo de agregación; este valor **no** debe interpretarse como el número total de eventos de entrada ni como una cantidad de resultados finales confirmados en el sink.
+
+![Grafo de procesamiento de Apache Flink](evidencias/preentrega-04/01_flink_grafo_procesamiento.png)
+
+#### 2. Checkpoints
+
+Durante la ejecución se observaron **35 checkpoints completados y 0 fallidos**. Esto verifica la ejecución del mecanismo de checkpoints durante la prueba, pero **no** implica que se haya ensayado la recuperación desde un checkpoint o ante una caída.
+
+![Checkpoints completados](evidencias/preentrega-04/02_flink_checkpoints.png)
+
+#### 3. Watermarks
+
+El Dashboard mostró avance de *watermarks* de Event Time, evidenciando progreso temporal dentro del procesamiento streaming. No se realizó una prueba específica de comportamiento con eventos tardíos o particiones inactivas.
+
+![Watermarks en Flink](evidencias/preentrega-04/03_flink_watermarks.png)
+
+#### 4. Productor de transacciones
+
+Se ejecutó `scripts/producer_flink.py` con una carga simulada de **90 transacciones**, enviada exitosamente a Kinesis. La confirmación del productor demuestra el envío aceptado, **no** que se hayan validado individualmente las 90 salidas de Flink.
+
+![Productor con 90 eventos enviados](evidencias/preentrega-04/04_productor_90_eventos.png)
+
+#### 5. Configuración del stream
+
+Se verificó en la consola AWS que `data-engineering-dev-ingestion` se encontraba **activo**, en modo **PROVISIONED**, con **2 shards** y retención de **1 día** durante la prueba.
+
+![Kinesis Data Streams activo con dos shards](evidencias/preentrega-04/05_kinesis_stream_active.png)
+
+#### 6. Validación local de las agregaciones
+
+Para comprobar los cálculos sin volver a encender recursos AWS, se ejecutó `flink/test_windows.py` en **Python 3.11.9**, con **PyFlink 1.20** y **Java 11**, en un entorno virtual separado `.venv-flink`.
+
+La prueba emplea cuatro eventos ficticios y verifica automáticamente que la consulta de ventanas de 60 segundos devuelva los siguientes resultados:
+
+| Ventana (UTC) | Tipo | Cantidad | Total | Promedio |
+|---|---|---:|---:|---:|
+| 2025-11-10 12:30–12:31 | compra | 2 | 3000.00 | 1500.00 |
+| 2025-11-10 12:30–12:31 | pago | 1 | 500.00 | 500.00 |
+| 2025-11-10 12:31–12:32 | compra | 1 | 3000.00 | 3000.00 |
+
+El script compara las filas obtenidas con las esperadas, independientemente del orden de salida. La ejecución finalizó con:
+
+```text
+PRUEBA DE AGREGACIONES SUPERADA
+Cantidad, suma y promedio correctos.
+```
+
+![Validación local de ventanas y agregaciones](evidencias/preentrega-04/06_flink_validacion_local.png)
+
+Para reproducir la prueba local, desde la raíz del repositorio y con Python 3.11 disponible:
+
+```powershell
+py -3.11 -m venv .venv-flink
+.\.venv-flink\Scripts\Activate.ps1
+python -m pip install apache-flink==1.20.3
+python .\flink\test_windows.py
+```
+
+**Alcance de la validación:** se comprobó la lógica de agregación por ventanas en modo *batch*, sobre datos conocidos. Esta prueba reproduce la lógica SQL esencial, pero **no** verifica por sí sola los *watermarks* del stream de AWS, el comportamiento ante eventos tardíos ni la escritura final de la aplicación administrada. No es una prueba automatizada de extremo a extremo del pipeline de producción.
+
+### Gestión de infraestructura y costos
+
+Toda la infraestructura de la prueba se definió mediante Terraform. Tras recopilar las evidencias, se revisó un plan de destrucción dirigido al módulo Kinesis. La revisión detectó dependencias con la aplicación Flink, por lo que se decidió retirar **también la aplicación administrada** junto con los recursos temporales de ingesta.
+
+El plan revisado incluyó **10 recursos**: ocho del módulo Kinesis/Firehose y dos del módulo Flink (aplicación y política asociada). Su aplicación terminó con:
+
+```text
+Apply complete! Resources: 0 added, 0 changed, 10 destroyed.
+```
+
+Se comprobó posteriormente que la consulta de aplicaciones Flink devolvía `[]` en `us-east-1`. Se conservaron el código fuente, las definiciones Terraform, el bucket S3 con el artefacto y la infraestructura base no incluida en el plan de limpieza.
+
+> **Precaución:** los módulos eliminados continúan declarados en los archivos `.tf`. Un futuro `terraform plan` normal puede proponer su **recreación**, con nuevos costos. Antes de ejecutar `terraform apply`, revisar siempre el plan completo y confirmar qué servicios se encenderán. Los planes binarios de Terraform y ambos entornos virtuales están excluidos por `.gitignore`.
+
+### Consideraciones y limitaciones
+
+- **Procesamiento administrado:** se observó el job ejecutándose en AWS y se registraron checkpoints y watermarks; no se comprobó una recuperación real después de un fallo.
+- **Resultados finales:** el conector `print` se usó para diagnóstico, pero no se obtuvo evidencia directa de las filas agregadas emitidas por el job AWS.
+- **Prueba local:** las cantidades, sumas y promedios se verificaron mediante PyFlink en modo batch. No sustituye una validación streaming completa.
+- **Paralelismo:** se utilizó paralelismo 1 para el laboratorio; no se evaluó escalado horizontal ni desempeño bajo carga.
+- **Persistencia analítica:** no se implementó un sink persistente para los resultados de `transaction_metrics`; S3 Bronze continúa almacenando los datos crudos mediante Firehose, no estas métricas.
+- **Costos:** los recursos de procesamiento e ingesta temporales se destruyeron al finalizar las pruebas; el resto de la infraestructura AWS debe seguir supervisándose por separado.
+
+### Resultado de la Pre-entrega 04
+
+Se implementó y ejecutó un flujo de procesamiento de eventos con **Python/Boto3 → Kinesis Data Streams → Apache Flink**, basado en Event Time, watermarks, ventanas de un minuto, agregaciones stateful y checkpoints.
+
+La prueba en AWS permitió observar el funcionamiento del job administrado; la prueba local verificó automáticamente las agregaciones de cantidades, sumas y promedios. Se documentó explícitamente el alcance de cada validación y se limpiaron con Terraform los recursos temporales para controlar costos.

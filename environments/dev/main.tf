@@ -142,3 +142,40 @@ module "kinesis" {
   data_bucket_arn = module.storage.data_bucket_arn
   data_prefix     = module.storage.data_prefix
 }
+
+
+# ============================================================
+# MODULO DE PROCESAMIENTO EN TIEMPO REAL - APACHE FLINK
+# PRE-ENTREGA 04 - DATA ENGINEERING
+# ============================================================
+
+# Integra Managed Service for Apache Flink al entorno DEV.
+#
+# Reutiliza:
+# - Kinesis Data Stream existente
+# - Bucket S3 del Data Lake
+# - Region AWS configurada para DEV
+#
+# El rol IAM y CloudWatch se administran dentro
+# del propio modulo Flink.
+
+module "flink" {
+
+  source = "../../modules/flink"
+
+  # Entorno y region.
+  environment = var.environment
+  aws_region  = var.aws_region
+
+  # Stream Kinesis existente.
+  kinesis_stream_arn = module.kinesis.stream_arn
+
+  # Bucket S3 existente.
+  data_bucket_arn  = module.storage.data_bucket_arn
+  data_bucket_name = module.storage.data_bucket_name
+
+  # Ubicacion del paquete publicado mediante Terraform.
+  flink_artifact_key     = aws_s3_object.flink_application.key
+  flink_artifact_version = aws_s3_object.flink_application.version_id
+
+}
