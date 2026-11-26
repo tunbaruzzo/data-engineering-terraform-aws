@@ -130,6 +130,7 @@ module "identity" {
 # Reutiliza el bucket S3 creado por el modulo storage.
 
 module "kinesis" {
+  count  = var.enable_streaming ? 1 : 0
   source = "../../modules/kinesis"
 
   # Entorno actual.
@@ -160,7 +161,7 @@ module "kinesis" {
 # del propio modulo Flink.
 
 module "flink" {
-
+  count  = var.enable_streaming ? 1 : 0
   source = "../../modules/flink"
 
   # Entorno y region.
@@ -168,7 +169,7 @@ module "flink" {
   aws_region  = var.aws_region
 
   # Stream Kinesis existente.
-  kinesis_stream_arn = module.kinesis.stream_arn
+  kinesis_stream_arn = module.kinesis[0].stream_arn
 
   # Bucket S3 existente.
   data_bucket_arn  = module.storage.data_bucket_arn
@@ -177,5 +178,34 @@ module "flink" {
   # Ubicacion del paquete publicado mediante Terraform.
   flink_artifact_key     = aws_s3_object.flink_application.key
   flink_artifact_version = aws_s3_object.flink_application.version_id
+
+
+  # Base de datos Glue administrada por el modulo Lakehouse.
+  glue_database_arn = module.lakehouse.database_arn
+
+}
+
+
+# ============================================================
+# MODULO LAKEHOUSE - AWS GLUE DATA CATALOG
+# PRE-ENTREGA 05 - DATA ENGINEERING
+# ============================================================
+
+# Integra el catalogo de datos Lakehouse al entorno DEV.
+#
+# El modulo administra:
+# - Base de datos logica en AWS Glue Data Catalog.
+# - Registro de tablas Iceberg (proxima etapa).
+#
+# Los archivos de datos y metadatos Iceberg se
+# almacenaran en el bucket S3 existente.
+
+module "lakehouse" {
+
+  source = "../../modules/lakehouse"
+
+  # Entorno actual.
+  environment      = var.environment
+  data_bucket_name = module.storage.data_bucket_name
 
 }

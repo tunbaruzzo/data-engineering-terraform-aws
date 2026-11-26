@@ -47,9 +47,9 @@ resource "aws_kinesisanalyticsv2_application" "flink" {
       code_content {
         s3_content_location {
 
-        bucket_arn     = var.data_bucket_arn
-        file_key       = var.flink_artifact_key
-        object_version = var.flink_artifact_version
+          bucket_arn     = var.data_bucket_arn
+          file_key       = var.flink_artifact_key
+          object_version = var.flink_artifact_version
         }
       }
     }
@@ -81,6 +81,23 @@ resource "aws_kinesisanalyticsv2_application" "flink" {
           "aws.region" = var.aws_region
         }
       }
+
+
+      # --------------------------------------------------------
+      # CONFIGURACION DEL LAKEHOUSE - PRE-ENTREGA 05
+      # --------------------------------------------------------
+
+      property_group {
+
+        property_group_id = "LakehouseConfig"
+
+        property_map = {
+          "catalog.database" = "lakehouse_db"
+          "catalog.warehouse" = "s3://${var.data_bucket_name}/lakehouse/"
+          "aws.region"        = var.aws_region
+        }
+      }
+
     }
 
     # ========================================================

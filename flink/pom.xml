@@ -16,6 +16,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <flink.version>1.20.0</flink.version>
         <kinesis.connector.version>5.0.0-1.20</kinesis.connector.version>
+        <iceberg.version>1.10.1</iceberg.version>
+        <hadoop.version>3.3.6</hadoop.version>
     </properties>
 
     <!-- Conector para consumir Amazon Kinesis Data Streams -->
@@ -25,10 +27,57 @@
             <artifactId>flink-connector-kinesis</artifactId>
             <version>${kinesis.connector.version}</version>
         </dependency>
+    <!-- Apache Iceberg compatible con Flink 1.20 -->
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-flink-runtime-1.20</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+    <!-- Integracion Iceberg con AWS Glue y Amazon S3 -->
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-aws-bundle</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+    <!-- Configuracion Hadoop requerida por el catalogo Iceberg -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+    <!-- Clases HDFS requeridas durante la inicializacion de Iceberg -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-hdfs-client</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+    <!-- ====================================================
+            FLINK CORE
+            Necesario para compilar nuestra clase HadoopUtils.
+            AWS proporciona estas clases durante la ejecucion.
+            ==================================================== -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-core</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
+            <!-- ====================================================
+                COMPILACION JAVA 11
+                Compatible con el runtime utilizado en AWS Flink.
+                ==================================================== -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <release>11</release>
+                </configuration>
+            </plugin>
             <!-- Empaqueta el conector y sus dependencias -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -47,6 +96,15 @@
                             </outputFile>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
 
+
+                            <!-- Evitar duplicar commons-cli, ya presente en Flink -->
+                            <artifactSet>
+                                <excludes>
+                                    <exclude>commons-cli:commons-cli</exclude>
+                                </excludes>
+                            </artifactSet>
+
+
                             <filters>
                                 <filter>
                                     <artifact>*:*</artifact>
@@ -61,6 +119,28 @@
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>
+
+                            <!-- ====================================================
+                                AISLAMIENTO DE CLASES HADOOP PARA FLINK / ICEBERG
+                                Configuracion validada en la prueba AWS Pre-05
+                                ==================================================== -->
+
+                            <relocations>
+
+                                <!-- Aislar la configuracion de Hadoop -->
+                                <relocation>
+                                    <pattern>org.apache.hadoop.conf</pattern>
+                                    <shadedPattern>shaded.org.apache.hadoop.conf</shadedPattern>
+                                </relocation>
+
+                                <!-- Evitar conflictos con HadoopUtils del runtime Flink -->
+                                <relocation>
+                                    <pattern>org.apache.flink.runtime.util.HadoopUtils</pattern>
+                                    <shadedPattern>shadow.org.apache.flink.runtime.util.HadoopUtils</shadedPattern>
+                                </relocation>
+
+                            </relocations>
+
                         </configuration>
                     </execution>
                 </executions>

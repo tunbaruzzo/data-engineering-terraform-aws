@@ -1,0 +1,3 @@
+boto3==1.43.114
+duckdb==2.0.1
+terraform-local==0.27.0

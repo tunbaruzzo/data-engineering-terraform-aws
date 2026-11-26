@@ -1,0 +1,116 @@
+# ============================================================
+# DATA ENGINEERING - LABORATORIO LAKEHOUSE LOCAL
+# PRE-ENTREGA 05
+# ============================================================
+
+name: data-engineering-pre05
+
+services:
+
+  # ==========================================================
+  # LOCALSTACK - SIMULACION DE SERVICIOS AWS
+  # ==========================================================
+
+  localstack:
+    image: localstack/localstack:latest
+
+    ports:
+      - "127.0.0.1:4566:4566"
+
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:?Token requerido}
+      SERVICES: s3,kinesis,iam,sts
+      DEBUG: "0"
+      PERSISTENCE: "1"
+
+    volumes:
+      - localstack_data:/var/lib/localstack
+
+    restart: unless-stopped
+
+  # ==========================================================
+  # POSTGRESQL - CATALOGO JDBC DE ICEBERG
+  # ==========================================================
+
+  postgres:
+    image: postgres:16-alpine
+
+    ports:
+      - "127.0.0.1:5433:5432"
+
+    environment:
+      POSTGRES_DB: lakehouse
+      POSTGRES_USER: ${POSTGRES_USER:?Usuario requerido}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Password requerido}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d lakehouse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+
+  # ==========================================================
+  # APACHE FLINK - JOBMANAGER
+  # ==========================================================
+
+  jobmanager:
+    image: flink:1.20.5-scala_2.12-java11
+
+    command: jobmanager
+
+    ports:
+      - "127.0.0.1:8081:8081"
+
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      POSTGRES_USER: ${POSTGRES_USER:?Usuario requerido}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Password requerido}
+
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        parallelism.default: 1
+
+    depends_on:
+      - localstack
+      - postgres
+
+  # ==========================================================
+  # APACHE FLINK - TASKMANAGER
+  # ==========================================================
+
+  taskmanager:
+    image: flink:1.20.5-scala_2.12-java11
+
+    command: taskmanager
+
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      POSTGRES_USER: ${POSTGRES_USER:?Usuario requerido}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Password requerido}
+
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 1
+
+    depends_on:
+      - jobmanager
+
+# ============================================================
+# VOLUMENES PERSISTENTES
+# ============================================================
+
+volumes:
+  localstack_data:
+  postgres_data:
