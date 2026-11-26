@@ -84,3 +84,15 @@ flink/target-experiment/
 
 # ZIP generados para pruebas y despliegues AWS.
 flink/application-pre*.zip
+
+# ============================================================
+# PRE-ENTREGA 05 - LAKEHOUSE LOCAL
+# ============================================================
+
+# Credenciales y variables de entorno locales.
+.env
+.env.*
+!.env.example
+
+# Artefactos Maven de la aplicacion local.
+app/target/
